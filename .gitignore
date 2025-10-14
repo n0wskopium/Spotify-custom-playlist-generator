@@ -1,0 +1,138 @@
+# Environment variables file - NEVER commit sensitive data!
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Spotify authentication cache
+.spotify_cache
+.cache
+*.cache
+
+# Python bytecode and cache files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cgi
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Database files (if using SQLite, but you're using MySQL)
+*.db
+*.sqlite
+*.sqlite3
+
+# Log files
+*.log
+logs/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# PyCharm
+.idea/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# Generated playlists and output files
+*.json
+!db.sql  # Keep the database schema
+generated_playlists/
+output/
+
+# Coverage reports
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Project-specific ignores
+# Remove these if you want to keep generated files
+*_recent.json
+*_playlist.json
+custom_playlist_*.json
+
+# Security
+secrets.json
+config.json
+credentials.json
+*.key
+*.pem
+*.crt
+*.csr
+
+# Package management
+Pipfile
+Pipfile.lock
+poetry.lock
+pyproject.toml  # Only if you don't want to share your project config
+
+# Documentation
+_site/
+.sass-cache/
+.jekyll-metadata
