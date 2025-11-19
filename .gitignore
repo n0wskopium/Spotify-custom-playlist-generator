@@ -4,13 +4,9 @@
 .env.development.local
 .env.test.local
 .env.production.local
-
-# Spotify authentication cache
 .spotify_cache
 .cache
 *.cache
-
-# Python bytecode and cache files
 __pycache__/
 *.py[cod]
 *$py.class
