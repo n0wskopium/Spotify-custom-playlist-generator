@@ -16,12 +16,12 @@ class LLMHandler:
         
         # Use the updated model name
         try:
-            self.model = genai.GenerativeModel('gemini-1.5-pro-latest')
+            self.model = genai.GenerativeModel('models/gemini-2.5-pro')
         except:
             try:
-                self.model = genai.GenerativeModel('gemini-pro')
+                self.model = genai.GenerativeModel('models/gemini-2.5-flash')
             except:
-                self.model = genai.GenerativeModel('models/gemini-pro')
+                self.model = genai.GenerativeModel('models/gemini-2.0-flash')
     
     def analyze_tracks_and_create_playlist(self, tracks_data: List[Dict], mood_description: str, playlist_name: str, max_tracks: int = 10) -> Dict[str, Any]:
         """Analyze tracks and create a custom playlist based on mood description"""

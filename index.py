@@ -96,6 +96,68 @@ def get_user_input(prompt, default=None, input_type=str):
             console.print("\n\n👋 Exiting...", style="bold yellow")
             exit()
 
+def show_enhanced_playlist_analytics():
+    """Display enhanced analytics in terminal"""
+    console = Console()
+    try:
+        spotify = SpotifyAPI()
+        custom_playlists = spotify.get_custom_playlists()
+        
+        if not custom_playlists:
+            console.print("\n📭 No custom playlists found for analytics.", style="bold yellow")
+            return
+        
+        console.print("\n📊 [bold cyan]Playlist Analytics Dashboard[/bold cyan]")
+        
+        # Get enhanced stats
+        playlist_stats = spotify.get_user_playlist_stats(limit=10)
+        
+        if playlist_stats:
+            # Display summary metrics
+            table = Table(show_header=True, header_style="bold magenta")
+            table.add_column("Playlist Name", width=25)
+            table.add_column("Tracks", width=8)
+            table.add_column("Avg Popularity", width=15)
+            table.add_column("Genres", width=30)
+            table.add_column("Created", width=12)
+            
+            for stats in playlist_stats:
+                table.add_row(
+                    stats['playlist_name'],
+                    str(stats['total_tracks']),
+                    f"{stats['avg_popularity']:.1f}",
+                    (stats['all_genres'][:27] + '...') if len(stats['all_genres']) > 30 else stats['all_genres'],
+                    stats['created_at'].strftime('%Y-%m-%d')
+                )
+            
+            console.print(table)
+            
+            # Option for detailed analysis
+            console.print("\n🔍 Enter a playlist ID for detailed analysis, or press Enter to continue: ")
+            try:
+                playlist_id = input("Playlist ID: ").strip()
+                if playlist_id:
+                    playlist_id = int(playlist_id)
+                    detailed = spotify.get_enhanced_playlist_analysis(playlist_id)
+                    if detailed:
+                        console.print(f"\n🎵 [bold]Detailed Analysis for {detailed['playlist_name']}[/bold]")
+                        console.print(f"📝 Description: {detailed['description']}")
+                        console.print(f"🎭 Mood: {detailed['mood_description']}")
+                        console.print(f"🔢 Tracks: {detailed['total_tracks']}")
+                        console.print(f"⭐ Popularity: {detailed['min_popularity']}-{detailed['max_popularity']} (avg: {detailed['avg_popularity']:.1f})")
+                        console.print(f"🎶 Genres: {detailed['all_genres']}")
+                        console.print(f"📅 Created: {detailed['created_at'].strftime('%Y-%m-%d %H:%M')}")
+            except ValueError:
+                console.print("❌ Invalid playlist ID!", style="bold red")
+                
+    except Exception as e:
+        console.print(f"❌ Error loading analytics: {e}", style="bold red")
+    finally:
+        try:
+            spotify.close()
+        except:
+            pass
+
 def main():
     # Initialize Spotify API handler
     console = Console()
@@ -325,22 +387,25 @@ if __name__ == "__main__":
         console.print("\n📋 [bold]Main Menu:[/bold]")
         console.print("   1. 🎨 Create New Custom Playlist")
         console.print("   2. 📂 View Previously Created Playlists") 
-        console.print("   3. 🚪 Exit")
+        console.print("   3. 📊 Playlist Analytics Dashboard")
+        console.print("   4. 🚪 Exit")
         
-        choice = get_user_input("Select an option (1-3)", default="1", input_type=str)
+        choice = get_user_input("Select an option (1-4)", default="1", input_type=str)
         
         if choice == "1":
             main()
         elif choice == "2":
             show_custom_playlists()
         elif choice == "3":
+            show_enhanced_playlist_analytics()
+        elif choice == "4":
             console.print("\n👋 Thank you for using Spotify Playlist Analyzer! Goodbye! 🎵", style="bold green")
             break
         else:
-            console.print("❌ Invalid option! Please select 1, 2, or 3.", style="bold red")
+            console.print("❌ Invalid option! Please select 1, 2, 3, or 4.", style="bold red")
         
         # Ask if user wants to continue
-        if choice in ["1", "2"]:
+        if choice in ["1", "2", "3"]:
             console.print("\n" + "="*50)
             continue_choice = input("\nWould you like to continue? (y/n, default: y): ").strip().lower()
             if continue_choice in ['n', 'no']:

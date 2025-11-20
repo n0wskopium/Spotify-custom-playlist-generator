@@ -8,6 +8,7 @@ import time
 import os
 from dotenv import load_dotenv
 load_dotenv()
+
 class SpotifyAPI:
     def __init__(self):
         # Initialize Spotify client with necessary scopes
@@ -435,6 +436,111 @@ class SpotifyAPI:
         except Exception as e:
             print(f"Error creating Spotify playlist: {e}")
             return None
+
+    def get_enhanced_playlist_analysis(self, playlist_id):
+        """Get comprehensive playlist analysis using stored procedure"""
+        try:
+            self.cursor.callproc('GetEnhancedPlaylistAnalysis', [playlist_id])
+            result = []
+            for result_set in self.cursor.stored_results():
+                result = result_set.fetchall()
+                break
+            
+            if result:
+                # Convert to dictionary
+                columns = ['playlist_name', 'description', 'mood_description', 'total_tracks', 
+                          'avg_popularity', 'min_popularity', 'max_popularity', 'all_genres', 'created_at']
+                return dict(zip(columns, result[0]))
+            return None
+            
+        except Exception as e:
+            print(f"Error in enhanced playlist analysis: {e}")
+            # Fallback to original method
+            return self.get_custom_playlist_analysis_fallback(playlist_id)
+
+    def get_user_playlist_stats(self, limit=5):
+        """Get user playlist statistics using stored procedure"""
+        try:
+            self.cursor.callproc('GetUserPlaylistStats', [limit])
+            result = []
+            for result_set in self.cursor.stored_results():
+                columns = [col[0] for col in result_set.description]
+                rows = result_set.fetchall()
+                result = [dict(zip(columns, row)) for row in rows]
+                break
+            return result
+            
+        except Exception as e:
+            print(f"Error getting playlist stats: {e}")
+            return []
+
+    def get_custom_playlist_analysis_fallback(self, playlist_id):
+        """Fallback method if stored procedure fails"""
+        try:
+            # Get playlist basic info
+            self.cursor.execute("""
+                SELECT playlist_name, description, mood_description, created_at
+                FROM custom_playlists WHERE id = %s
+            """, (playlist_id,))
+            playlist = self.cursor.fetchone()
+            
+            if not playlist:
+                return None
+                
+            # Get track stats
+            self.cursor.execute("""
+                SELECT COUNT(*) as total_tracks, 
+                       AVG(t.popularity) as avg_popularity,
+                       MIN(t.popularity) as min_popularity,
+                       MAX(t.popularity) as max_popularity,
+                       GROUP_CONCAT(DISTINCT ag.genre) as all_genres
+                FROM custom_playlist_tracks cpt
+                LEFT JOIN tracks t ON cpt.track_id = t.id
+                LEFT JOIN artist_genres ag ON t.id = ag.track_id
+                WHERE cpt.playlist_id = %s
+            """, (playlist_id,))
+            
+            stats = self.cursor.fetchone()
+            
+            return {
+                'playlist_name': playlist[0],
+                'description': playlist[1],
+                'mood_description': playlist[2],
+                'total_tracks': stats[0] or 0,
+                'avg_popularity': float(stats[1]) if stats[1] else 0,
+                'min_popularity': stats[2] or 0,
+                'max_popularity': stats[3] or 0,
+                'all_genres': stats[4] or 'No genres',
+                'created_at': playlist[3]
+            }
+            
+        except Exception as e:
+            print(f"Error in fallback analysis: {e}")
+            return None
+
+    def get_playlist_audit_trail(self, playlist_id):
+        """Get audit trail for a playlist"""
+        try:
+            self.cursor.execute("""
+                SELECT old_name, new_name, changed_by, change_date
+                FROM playlist_audit
+                WHERE playlist_id = %s
+                ORDER BY change_date DESC
+            """, (playlist_id,))
+            
+            audit_trail = []
+            for row in self.cursor.fetchall():
+                audit_trail.append({
+                    'old_name': row[0],
+                    'new_name': row[1],
+                    'changed_by': row[2],
+                    'change_date': row[3]
+                })
+            return audit_trail
+            
+        except Exception as e:
+            print(f"Error getting audit trail: {e}")
+            return []
 
     def close(self):
         """Close database connection"""

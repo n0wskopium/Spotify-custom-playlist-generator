@@ -274,7 +274,7 @@ def fetch_tracks():
                             'Genres': ', '.join(track['artist_genres'][:3]) if track['artist_genres'] else 'No genres'
                         })
                     
-                    st.dataframe(pd.DataFrame(preview_data), use_container_width=True)
+                    st.dataframe(pd.DataFrame(preview_data), width="stretch")
                 else:
                     st.error("❌ Failed to fetch tracks from the playlist!")
 
@@ -338,23 +338,8 @@ def create_custom_playlist():
                     tracks_df = tracks_df[['position', 'track_name', 'artist', 'album']]
                     tracks_df.columns = ['#', 'Track Name', 'Artist', 'Album']
                     
-                    st.dataframe(tracks_df, use_container_width=True)
+                    st.dataframe(tracks_df, width="stretch")
                     
-                    # Option to create on Spotify
-                    '''st.subheader("🚀 Publish to Spotify")
-                    if st.button("📢 Create on Spotify"):
-                        with st.spinner("Creating playlist on Spotify..."):
-                            track_ids = [track.get('track_id') for track in custom_playlist['tracks']]
-                            spotify_playlist = st.session_state.spotify_api.create_spotify_playlist(
-                                custom_playlist['playlist_name'],
-                                custom_playlist['description'],
-                                track_ids
-                            )
-                            
-                            if spotify_playlist:
-                                st.success(f"✅ Playlist created on Spotify!")
-                                st.markdown(f"**[Open in Spotify]({spotify_playlist['external_urls']['spotify']})**")
-                    '''
                 except Exception as e:
                     st.error(f"❌ Error generating playlist: {e}")
                     st.info("💡 Try adjusting your mood description or selecting more tracks to analyze.")
@@ -387,9 +372,94 @@ def view_custom_playlists():
                     if tracks:
                         tracks_df = pd.DataFrame(tracks)
                         st.dataframe(tracks_df[['position', 'track_name', 'artist', 'album']], 
-                                   use_container_width=True, hide_index=True)
+                                   width="stretch", hide_index=True)
                     else:
                         st.write("No tracks found for this playlist.")
+
+def show_playlist_analytics():
+    """Display enhanced playlist analytics"""
+    st.header("📊 Playlist Analytics")
+    
+    if not st.session_state.spotify_api:
+        st.error("❌ Please connect to Spotify first!")
+        st.info("👈 Click 'Connect to Spotify' in the sidebar")
+        return
+    
+    # Refresh custom playlists for analytics
+    with st.spinner("Loading your playlists..."):
+        st.session_state.custom_playlists = st.session_state.spotify_api.get_custom_playlists()
+    
+    if not st.session_state.custom_playlists:
+        st.info("📭 No custom playlists found. Create some playlists first!")
+        st.write("💡 Go to 'Create Playlist' to generate your first AI-powered playlist!")
+        return
+    
+    st.success(f"✅ Found {len(st.session_state.custom_playlists)} custom playlists!")
+    
+    # Get user playlist stats
+    with st.spinner("Analyzing playlist statistics..."):
+        playlist_stats = st.session_state.spotify_api.get_user_playlist_stats(limit=10)
+    
+    if not playlist_stats:
+        st.error("❌ Could not load playlist statistics")
+        st.info("This might be because:")
+        st.write("- Database views/procedures aren't set up correctly")
+        st.write("- There are no tracks in your playlists")
+        st.write("- There's a connection issue with the database")
+        return
+    
+    # Display stats in metrics
+    st.subheader("📈 Overview Metrics")
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        total_playlists = len(playlist_stats)
+        st.metric("Total Playlists", total_playlists)
+    
+    with col2:
+        # Safely calculate average tracks
+        total_tracks_list = [p['total_tracks'] for p in playlist_stats if isinstance(p['total_tracks'], (int, float))]
+        avg_tracks = sum(total_tracks_list) / len(total_tracks_list) if total_tracks_list else 0
+        st.metric("Avg Tracks/Playlist", f"{avg_tracks:.1f}")
+    
+    with col3:
+        # Safely calculate max popularity
+        popularities = []
+        for p in playlist_stats:
+            if 'avg_popularity' in p:
+                try:
+                    pop_val = float(p['avg_popularity'])
+                    if pop_val > 0:
+                        popularities.append(pop_val)
+                except (ValueError, TypeError):
+                    continue
+        max_popularity = max(popularities) if popularities else 0
+        st.metric("Max Avg Popularity", f"{max_popularity:.0f}")
+    
+    with col4:
+        total_tracks = sum([p['total_tracks'] for p in playlist_stats if isinstance(p['total_tracks'], (int, float))])
+        st.metric("Total Tracks", total_tracks)
+    
+    # Display playlist stats table
+    st.subheader("🎵 Playlist Statistics")
+    if playlist_stats:
+        # Convert to DataFrame for nice display
+        stats_df = pd.DataFrame(playlist_stats)
+        
+        # Format the DataFrame - FIXED CODE
+        if not stats_df.empty:
+            # Convert avg_popularity to numeric, handling errors
+            stats_df['avg_popularity'] = pd.to_numeric(stats_df['avg_popularity'], errors='coerce')
+            stats_df['avg_popularity'] = stats_df['avg_popularity'].fillna(0)
+            stats_df['avg_popularity'] = stats_df['avg_popularity'].round(1)
+            
+            st.dataframe(stats_df, width="stretch")
+        else:
+            st.info("No statistics data available")
+    else:
+        st.info("No playlist statistics to display")
+    
+    # ... rest of the function remains the same ...
 
 def main():
     # Load custom CSS
@@ -421,7 +491,7 @@ def main():
         st.subheader("🎵 Navigation")
         page = st.radio(
             "Choose a section:",
-            ["Create Playlist", "View Playlists", "About"]
+            ["Create Playlist", "View Playlists", "Playlist Analytics", "About"]
         )
     
     # Main content based on navigation
@@ -451,6 +521,15 @@ def main():
         else:
             st.info("👈 Connect to Spotify first to view your playlists!")
     
+    elif page == "Playlist Analytics":
+        st.header("📊 Playlist Analytics")
+        st.markdown("Deep insights into your created playlists and performance metrics")
+        
+        if st.session_state.spotify_api:
+            show_playlist_analytics()
+        else:
+            st.info("👈 Connect to Spotify first to view analytics!")
+    
     elif page == "About":
         st.header("About Spotify AI Curator")
         st.markdown("""
@@ -469,6 +548,7 @@ def main():
         - 💾 Save playlists to database
         - 📱 Spotify integration
         - 🎯 Personalized recommendations
+        - 📊 Advanced analytics
         
         ### 🔧 Technology Stack
         
