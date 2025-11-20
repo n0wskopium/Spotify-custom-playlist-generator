@@ -1,17 +1,16 @@
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 import mysql.connector
-from datetime import datetime
-from datetime import date
+from datetime import datetime, date
 import json
-import time
 import os
 from dotenv import load_dotenv
+
 load_dotenv()
 
 class SpotifyAPI:
     def __init__(self):
-        # Initialize Spotify client with necessary scopes
+        # Scopes for reading library and modifying playlists
         scope = " ".join([
             "playlist-read-private",
             "playlist-read-collaborative",
@@ -27,13 +26,11 @@ class SpotifyAPI:
             client_secret=os.getenv('SPOTIFY_CLIENT_SECRET'),
             redirect_uri="http://127.0.0.1:8000/callback",
             scope=scope,
-            open_browser=True,
-            cache_path=".spotify_cache"  # Save tokens to cache file
+            cache_path=".spotify_cache"
         )
         
         self.sp = spotipy.Spotify(auth_manager=auth_manager)
         
-        # Initialize MySQL connection
         self.db = mysql.connector.connect(
             host=os.getenv('DB_HOST'),
             user=os.getenv("DB_USER"),
@@ -46,374 +43,218 @@ class SpotifyAPI:
         """Get all playlists of the current user"""
         try:
             playlists = []
-            results = self.sp.current_user_playlists()
-            
+            results = self.sp.current_user_playlists(limit=50)
             while results:
                 for item in results['items']:
-                    playlist = {
-                        'id': item['id'],
-                        'name': item['name'],
-                        'tracks_total': item['tracks']['total'],
-                        'owner': item['owner']['display_name']
-                    }
-                    playlists.append(playlist)
+                    if item:
+                        playlists.append({
+                            'id': item['id'],
+                            'name': item['name'],
+                            'tracks_total': item['tracks']['total'],
+                            'owner': item['owner']['display_name']
+                        })
                 results = self.sp.next(results) if results['next'] else None
-                
             return playlists
-            
         except Exception as e:
             print(f"Error fetching playlists: {e}")
-            return None
+            return []
 
-    def get_playlist_tracks(self, playlist_id, limit=5):
-        """Get metadata for top tracks in a playlist"""
+    def get_playlist_tracks(self, playlist_id, limit=20):
+        """Get metadata for tracks with optimized batch processing"""
         try:
-            tracks_data = []
+            # 1. Fetch tracks from Spotify
             results = self.sp.playlist_tracks(playlist_id, limit=limit)
-            
             if not results or 'items' not in results:
                 print("No tracks found in playlist")
                 return []
 
-            for item in results['items']:
-                if not item or 'track' not in item or not item['track']:
-                    continue
+            raw_items = [item['track'] for item in results['items'] if item and item.get('track')]
+            artist_ids = set()
+            
+            # Collect all Artist IDs first
+            for track in raw_items:
+                if track.get('artists'):
+                    artist_ids.add(track['artists'][0]['id'])
 
-                track = item['track']
+            # 2. Batch Fetch Artist Genres (1 call per 50 artists vs 1 call per track)
+            artist_genres_map = {}
+            if artist_ids:
+                artist_ids_list = list(artist_ids)
+                for i in range(0, len(artist_ids_list), 50):
+                    batch = artist_ids_list[i:i+50]
+                    try:
+                        artists_info = self.sp.artists(batch)
+                        for artist in artists_info['artists']:
+                            artist_genres_map[artist['id']] = artist.get('genres', [])
+                    except Exception as e:
+                        print(f"Warning: Error fetching artist batch: {e}")
+
+            # 3. Construct Track Data Objects
+            tracks_data = []
+            for track in raw_items:
+                primary_artist = track['artists'][0] if track.get('artists') else None
+                genres = artist_genres_map.get(primary_artist['id'], []) if primary_artist else []
                 
-                # Get artist genres
-                genres = []
-                try:
-                    if track['artists'] and len(track['artists']) > 0:
-                        artist = self.sp.artist(track['artists'][0]['id'])
-                        if artist and 'genres' in artist:
-                            genres = artist['genres']
-                except Exception as e:
-                    print(f"Warning: Could not fetch genres for {track.get('name', 'Unknown track')}")
-                
-                # Create track data
-                track_data = {
+                tracks_data.append({
                     "id": track.get('id', ''),
                     "track_name": track.get('name', 'Unknown'),
-                    "artist": track['artists'][0]['name'] if track.get('artists') else 'Unknown Artist',
-                    "album": track['album']['name'] if track.get('album') else 'Unknown Album',
+                    "artist": primary_artist['name'] if primary_artist else 'Unknown',
+                    "album": track['album']['name'] if track.get('album') else 'Unknown',
                     "release_date": track['album']['release_date'] if track.get('album') else None,
                     "artist_genres": genres,
                     "popularity": track.get('popularity', 0)
-                }
-                
-                # Store in database
-                try:
-                    self.store_track_data(track['id'], track_data)
-                    tracks_data.append(track_data)
-                except Exception as e:
-                    print(f"Warning: Could not store track {track.get('name', 'Unknown')}: {e}")
-                    continue
+                })
 
+            # 4. Batch Store in Database
+            if tracks_data:
+                self.store_tracks_batch(tracks_data)
+            
             return tracks_data
 
         except Exception as e:
             print(f"Error fetching playlist data: {e}")
-            return []    
+            return []
 
-    def store_track_data(self, track_id, track_data):
+    def store_tracks_batch(self, tracks_data):
+        """Optimized batch storage of tracks, genres, and history"""
         try:
-            # Get audio features with retry mechanism
-            retries = 3
-            audio_features = None
+            track_values = []
+            genre_values = []
+            history_values = []
             
-            # Format release date (handle partial dates)
-            release_date = track_data['release_date']
-            if release_date:
-                if len(release_date) == 4:  # Just year
-                    release_date = f"{release_date}-01-01"
-                elif len(release_date) == 7:  # Year and month
-                    release_date = f"{release_date}-01"
+            for t in tracks_data:
+                # Format date
+                r_date = t['release_date']
+                if r_date:
+                    if len(r_date) == 4: r_date += "-01-01"
+                    elif len(r_date) == 7: r_date += "-01"
                 
-            # Insert basic track info
-            self.cursor.execute("""
+                track_values.append((
+                    t['id'], t['track_name'], t['artist'], t['album'], r_date, t['popularity']
+                ))
+                
+                for g in t['artist_genres']:
+                    genre_values.append((t['id'], g))
+                
+                history_values.append((t['id'],))
+
+            # Bulk Upsert Tracks
+            self.cursor.executemany("""
                 INSERT INTO tracks (id, track_name, artist, album, release_date, popularity)
                 VALUES (%s, %s, %s, %s, %s, %s)
                 ON DUPLICATE KEY UPDATE
-                    track_name = VALUES(track_name),
-                    artist = VALUES(artist),
-                    album = VALUES(album),
-                    release_date = VALUES(release_date),
-                    popularity = VALUES(popularity)
-            """, (
-                track_id,
-                track_data['track_name'],
-                track_data['artist'],
-                track_data['album'],
-                release_date,
-                track_data['popularity']
-            ))
+                    track_name = VALUES(track_name), artist = VALUES(artist),
+                    album = VALUES(album), popularity = VALUES(popularity)
+            """, track_values)
 
-            # Insert genres
-            self.cursor.execute("DELETE FROM artist_genres WHERE track_id = %s", (track_id,))
-            for genre in track_data['artist_genres']:
-                self.cursor.execute("""
-                    INSERT INTO artist_genres (track_id, genre)
-                    VALUES (%s, %s)
-                """, (track_id, genre))
+            # Refresh Genres (Delete old for these tracks, Insert new)
+            track_ids = [t[0] for t in track_values]
+            if track_ids:
+                format_strings = ','.join(['%s'] * len(track_ids))
+                self.cursor.execute(f"DELETE FROM artist_genres WHERE track_id IN ({format_strings})", track_ids)
+                
+                if genre_values:
+                    self.cursor.executemany("INSERT INTO artist_genres (track_id, genre) VALUES (%s, %s)", genre_values)
+                
+                # Log History
+                if history_values:
+                    self.cursor.executemany("INSERT INTO track_history (track_id) VALUES (%s)", history_values)
 
-            # Commit the changes
             self.db.commit()
-
-            # Record the request in track_history (so we can retrieve recent requests)
-            try:
-                self.cursor.execute("INSERT INTO track_history (track_id) VALUES (%s)", (track_id,))
-                self.db.commit()
-            except Exception:
-                # If history insert fails, don't block the main flow
-                self.db.rollback()
-
+            
         except Exception as e:
-            print(f"Error storing track data: {e}")
+            print(f"Error storing batch tracks: {e}")
             self.db.rollback()
 
-    def get_stored_tracks_json(self, limit=5):
-        """Retrieve stored tracks from database in JSON format"""
-        try:
-            tracks = []
-            
-            # Get tracks with their genres
-            self.cursor.execute("""
-                SELECT t.id, t.track_name, t.artist, t.album, t.release_date, t.popularity,
-                       GROUP_CONCAT(ag.genre) as genres
-                FROM tracks t
-                LEFT JOIN artist_genres ag ON t.id = ag.track_id
-                GROUP BY t.id
-                LIMIT %s
-            """, (limit,))
-            
-            results = self.cursor.fetchall()
-            
-            if not results:
-                print("No tracks found in database")
-                return json.dumps([])
-            
-            for row in results:
-                # Format release date if exists
-                release_date = row[4]
-                if release_date and isinstance(release_date, (date, datetime)):
-                    release_date = release_date.strftime('%Y-%m-%d')
-                
-                track_data = {
-                    "id": row[0],
-                    "track_name": row[1] or 'Unknown',
-                    "artist": row[2] or 'Unknown Artist',
-                    "album": row[3] or 'Unknown Album',
-                    "release_date": release_date,
-                    "artist_genres": row[6].split(',') if row[6] else [],
-                    "popularity": row[5] or 0
-                }
-                tracks.append(track_data)
-            
-            return json.dumps(tracks, indent=2)
-
-        except mysql.connector.Error as err:
-            print(f"Database error while retrieving tracks: {err}")
-            return json.dumps([])
-        except Exception as e:
-            print(f"Unexpected error while retrieving tracks: {e}")
-            return json.dumps([])
-
-    def get_recent_tracks_json(self, limit=5):
-        """Retrieve most recently requested tracks from database in JSON format"""
-        try:
-            tracks = []
-            # Get recent tracks with their genres and last requested time
-            self.cursor.execute("""
-                SELECT t.id, t.track_name, t.artist, t.album, t.release_date, t.popularity,
-                       GROUP_CONCAT(ag.genre) as genres,
-                       MAX(th.requested_at) as last_requested
-                FROM track_history th
-                JOIN tracks t ON th.track_id = t.id
-                LEFT JOIN artist_genres ag ON t.id = ag.track_id
-                GROUP BY t.id
-                ORDER BY last_requested DESC
-                LIMIT %s
-            """, (limit,))
-
-            results = self.cursor.fetchall()
-
-            if not results:
-                print("No recent tracks found in database")
-                return json.dumps([])
-
-            for row in results:
-                release_date = row[4]
-                if release_date and isinstance(release_date, (date, datetime)):
-                    release_date = release_date.strftime('%Y-%m-%d')
-
-                track_data = {
-                    "id": row[0],
-                    "track_name": row[1] or 'Unknown',
-                    "artist": row[2] or 'Unknown Artist',
-                    "album": row[3] or 'Unknown Album',
-                    "release_date": release_date,
-                    "artist_genres": row[6].split(',') if row[6] else [],
-                    "popularity": row[5] or 0,
-                    "last_requested": row[7].strftime('%Y-%m-%d %H:%M:%S') if row[7] else None
-                }
-                tracks.append(track_data)
-
-            return json.dumps(tracks, indent=2)
-
-        except mysql.connector.Error as err:
-            print(f"Database error while retrieving recent tracks: {err}")
-            return json.dumps([])
-        except Exception as e:
-            print(f"Unexpected error while retrieving recent tracks: {e}")
-            return json.dumps([])
-
     def store_custom_playlist(self, playlist_data, mood_description):
-        """Store custom generated playlist in database"""
+        """Store custom playlist using batch processing"""
         try:
-            # Insert main playlist record
+            # Insert Playlist Header
             self.cursor.execute("""
                 INSERT INTO custom_playlists (playlist_name, description, mood_description)
                 VALUES (%s, %s, %s)
-            """, (
-                playlist_data['playlist_name'],
-                playlist_data['description'],
-                mood_description
-            ))
+            """, (playlist_data['playlist_name'], playlist_data['description'], mood_description))
             
             playlist_id = self.cursor.lastrowid
             
-            # Insert playlist tracks
+            # Batch Insert Tracks (Triggers in DB will update stats automatically)
+            track_values = []
             for track in playlist_data['tracks']:
-                self.cursor.execute("""
+                track_values.append((
+                    playlist_id, track.get('track_id'), track['track_name'],
+                    track['artist'], track['album'], track['position']
+                ))
+            
+            if track_values:
+                self.cursor.executemany("""
                     INSERT INTO custom_playlist_tracks 
                     (playlist_id, track_id, track_name, artist, album, position)
                     VALUES (%s, %s, %s, %s, %s, %s)
-                """, (
-                    playlist_id,
-                    track.get('track_id'),
-                    track['track_name'],
-                    track['artist'],
-                    track['album'],
-                    track['position']
-                ))
+                """, track_values)
             
             self.db.commit()
-            print(f"✅ Custom playlist '{playlist_data['playlist_name']}' stored in database with ID: {playlist_id}")
+            print(f"✅ Custom playlist '{playlist_data['playlist_name']}' stored with ID: {playlist_id}")
             
         except Exception as e:
             print(f"Error storing custom playlist: {e}")
             self.db.rollback()
-            raise
+
+    def get_enhanced_playlist_analysis(self, playlist_id):
+        """Get analytics using the Optimized View via Stored Procedure"""
+        try:
+            self.cursor.callproc('GetEnhancedPlaylistAnalysis', [playlist_id])
+            for result in self.cursor.stored_results():
+                row = result.fetchone()
+                if row:
+                    return dict(zip(result.column_names, row))
+            return None
+        except Exception as e:
+            print(f"Error in enhanced analysis: {e}")
+            return None
+
+    def get_user_playlist_stats(self, limit=5):
+        """Get list of playlists with stats via Stored Procedure"""
+        try:
+            self.cursor.callproc('GetUserPlaylistStats', [limit])
+            for result in self.cursor.stored_results():
+                columns = result.column_names
+                return [dict(zip(columns, row)) for row in result.fetchall()]
+            return []
+        except Exception as e:
+            print(f"Error getting playlist stats: {e}")
+            return []
 
     def get_custom_playlists(self):
-        """Retrieve all custom generated playlists"""
+        """Standard retrieval of playlists"""
         try:
             self.cursor.execute("""
-                SELECT id, playlist_name, description, mood_description, created_at
-                FROM custom_playlists 
-                ORDER BY created_at DESC
+                SELECT id, playlist_name, description, mood_description, created_at 
+                FROM custom_playlists ORDER BY created_at DESC
             """)
-            
-            playlists = []
-            for row in self.cursor.fetchall():
-                playlist = {
-                    'id': row[0],
-                    'playlist_name': row[1],
-                    'description': row[2],
-                    'mood_description': row[3],
-                    'created_at': row[4]
-                }
-                playlists.append(playlist)
-            
-            return playlists
-            
+            columns = [col[0] for col in self.cursor.description]
+            return [dict(zip(columns, row)) for row in self.cursor.fetchall()]
         except Exception as e:
             print(f"Error fetching custom playlists: {e}")
             return []
 
     def get_custom_playlist_tracks(self, playlist_id):
-        """Get tracks for a specific custom playlist"""
+        """Standard retrieval of playlist tracks"""
         try:
             self.cursor.execute("""
-                SELECT track_name, artist, album, position
-                FROM custom_playlist_tracks
-                WHERE playlist_id = %s
-                ORDER BY position
+                SELECT track_name, artist, album, position 
+                FROM custom_playlist_tracks 
+                WHERE playlist_id = %s ORDER BY position
             """, (playlist_id,))
-            
-            tracks = []
-            for row in self.cursor.fetchall():
-                track = {
-                    'track_name': row[0],
-                    'artist': row[1],
-                    'album': row[2],
-                    'position': row[3]
-                }
-                tracks.append(track)
-            
-            return tracks
-            
+            columns = [col[0] for col in self.cursor.description]
+            return [dict(zip(columns, row)) for row in self.cursor.fetchall()]
         except Exception as e:
             print(f"Error fetching custom playlist tracks: {e}")
             return []
 
-    def get_all_tracks_for_analysis(self, limit=50):
-        """Get all available tracks from database for LLM analysis"""
-        try:
-            tracks = []
-            
-            # Get tracks with their genres
-            self.cursor.execute("""
-                SELECT t.id, t.track_name, t.artist, t.album, t.release_date, t.popularity,
-                       GROUP_CONCAT(ag.genre) as genres
-                FROM tracks t
-                LEFT JOIN artist_genres ag ON t.id = ag.track_id
-                GROUP BY t.id
-                ORDER BY t.popularity DESC
-                LIMIT %s
-            """, (limit,))
-            
-            results = self.cursor.fetchall()
-            
-            if not results:
-                print("No tracks found in database for analysis")
-                return []
-            
-            for row in results:
-                # Format release date if exists
-                release_date = row[4]
-                if release_date and isinstance(release_date, (date, datetime)):
-                    release_date = release_date.strftime('%Y-%m-%d')
-                
-                track_data = {
-                    "id": row[0],
-                    "track_name": row[1] or 'Unknown',
-                    "artist": row[2] or 'Unknown Artist',
-                    "album": row[3] or 'Unknown Album',
-                    "release_date": release_date,
-                    "artist_genres": row[6].split(',') if row[6] else [],
-                    "popularity": row[5] or 0
-                }
-                tracks.append(track_data)
-            
-            return tracks
-
-        except mysql.connector.Error as err:
-            print(f"Database error while retrieving tracks for analysis: {err}")
-            return []
-        except Exception as e:
-            print(f"Unexpected error while retrieving tracks for analysis: {e}")
-            return []
-
     def create_spotify_playlist(self, playlist_name, description, track_ids):
-        """Create an actual Spotify playlist with the selected tracks"""
+        """Create playlist on Spotify"""
         try:
-            # Get current user ID
-            user = self.sp.current_user()
-            user_id = user['id']
-            
-            # Create empty playlist
+            user_id = self.sp.current_user()['id']
             playlist = self.sp.user_playlist_create(
                 user=user_id,
                 name=playlist_name,
@@ -421,128 +262,17 @@ class SpotifyAPI:
                 public=True
             )
             
-            # Add tracks to playlist
-            if track_ids:
-                # Filter out None values
-                valid_track_ids = [tid for tid in track_ids if tid]
-                if valid_track_ids:
-                    self.sp.playlist_add_items(playlist['id'], valid_track_ids)
-            
-            print(f"✅ Spotify playlist '{playlist_name}' created successfully!")
-            print(f"🔗 Playlist URL: {playlist['external_urls']['spotify']}")
+            valid_ids = [tid for tid in track_ids if tid]
+            if valid_ids:
+                self.sp.playlist_add_items(playlist['id'], valid_ids)
             
             return playlist
-            
         except Exception as e:
             print(f"Error creating Spotify playlist: {e}")
             return None
 
-    def get_enhanced_playlist_analysis(self, playlist_id):
-        """Get comprehensive playlist analysis using stored procedure"""
-        try:
-            self.cursor.callproc('GetEnhancedPlaylistAnalysis', [playlist_id])
-            result = []
-            for result_set in self.cursor.stored_results():
-                result = result_set.fetchall()
-                break
-            
-            if result:
-                # Convert to dictionary
-                columns = ['playlist_name', 'description', 'mood_description', 'total_tracks', 
-                          'avg_popularity', 'min_popularity', 'max_popularity', 'all_genres', 'created_at']
-                return dict(zip(columns, result[0]))
-            return None
-            
-        except Exception as e:
-            print(f"Error in enhanced playlist analysis: {e}")
-            # Fallback to original method
-            return self.get_custom_playlist_analysis_fallback(playlist_id)
-
-    def get_user_playlist_stats(self, limit=5):
-        """Get user playlist statistics using stored procedure"""
-        try:
-            self.cursor.callproc('GetUserPlaylistStats', [limit])
-            result = []
-            for result_set in self.cursor.stored_results():
-                columns = [col[0] for col in result_set.description]
-                rows = result_set.fetchall()
-                result = [dict(zip(columns, row)) for row in rows]
-                break
-            return result
-            
-        except Exception as e:
-            print(f"Error getting playlist stats: {e}")
-            return []
-
-    def get_custom_playlist_analysis_fallback(self, playlist_id):
-        """Fallback method if stored procedure fails"""
-        try:
-            # Get playlist basic info
-            self.cursor.execute("""
-                SELECT playlist_name, description, mood_description, created_at
-                FROM custom_playlists WHERE id = %s
-            """, (playlist_id,))
-            playlist = self.cursor.fetchone()
-            
-            if not playlist:
-                return None
-                
-            # Get track stats
-            self.cursor.execute("""
-                SELECT COUNT(*) as total_tracks, 
-                       AVG(t.popularity) as avg_popularity,
-                       MIN(t.popularity) as min_popularity,
-                       MAX(t.popularity) as max_popularity,
-                       GROUP_CONCAT(DISTINCT ag.genre) as all_genres
-                FROM custom_playlist_tracks cpt
-                LEFT JOIN tracks t ON cpt.track_id = t.id
-                LEFT JOIN artist_genres ag ON t.id = ag.track_id
-                WHERE cpt.playlist_id = %s
-            """, (playlist_id,))
-            
-            stats = self.cursor.fetchone()
-            
-            return {
-                'playlist_name': playlist[0],
-                'description': playlist[1],
-                'mood_description': playlist[2],
-                'total_tracks': stats[0] or 0,
-                'avg_popularity': float(stats[1]) if stats[1] else 0,
-                'min_popularity': stats[2] or 0,
-                'max_popularity': stats[3] or 0,
-                'all_genres': stats[4] or 'No genres',
-                'created_at': playlist[3]
-            }
-            
-        except Exception as e:
-            print(f"Error in fallback analysis: {e}")
-            return None
-
-    def get_playlist_audit_trail(self, playlist_id):
-        """Get audit trail for a playlist"""
-        try:
-            self.cursor.execute("""
-                SELECT old_name, new_name, changed_by, change_date
-                FROM playlist_audit
-                WHERE playlist_id = %s
-                ORDER BY change_date DESC
-            """, (playlist_id,))
-            
-            audit_trail = []
-            for row in self.cursor.fetchall():
-                audit_trail.append({
-                    'old_name': row[0],
-                    'new_name': row[1],
-                    'changed_by': row[2],
-                    'change_date': row[3]
-                })
-            return audit_trail
-            
-        except Exception as e:
-            print(f"Error getting audit trail: {e}")
-            return []
-
     def close(self):
         """Close database connection"""
-        self.cursor.close()
-        self.db.close()
+        if self.db.is_connected():
+            self.cursor.close()
+            self.db.close()
